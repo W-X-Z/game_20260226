@@ -1,11 +1,10 @@
 // ============================================================
-// UIScene.js - HUD + 크래프팅 UI + 레벨업
+// UIScene.js - HUD + 드래그 앤 드롭 크래프팅 UI + 레벨업
 // ============================================================
 import {
   GAME_WIDTH, GAME_HEIGHT,
   BASE_SPELLS, MODIFIERS, ENEMY_TYPES
 } from '../config.js';
-import { computeParams } from '../systems/SpellSystem.js';
 
 export class UIScene extends Phaser.Scene {
   constructor() { super('UIScene'); }
@@ -23,7 +22,6 @@ export class UIScene extends Phaser.Scene {
     this.waveTxt = this._txt(14, 14, 'Wave 1', 12, '#88aaff', 102).setOrigin(0, 0);
     this.hintTxt = this._txt(GAME_WIDTH / 2, GAME_HEIGHT - 10, 'TAB: 지팡이 편집', 10, '#555', 102);
 
-    // 지팡이 미니 슬롯 (HUD 하단)
     this.slotEls = [];
 
     // 보스 HP
@@ -32,9 +30,15 @@ export class UIScene extends Phaser.Scene {
     this.bossTxt   = this._txt(GAME_WIDTH / 2, GAME_HEIGHT - 42, '', 10, '#ff4444', 102).setVisible(false);
 
     // 오버레이 배열
-    this._luEls = [];     // 레벨업 UI
-    this._crEls = [];     // 크래프팅 UI
-    this._crSelected = null; // 크래프팅 선택 중인 인벤토리 인덱스
+    this._luEls = [];
+    this._crEls = [];
+
+    // ── 드래그 상태 ──
+    this._dragGhost = null;       // 드래그 중 표시되는 고스트 아이콘
+    this._dragSource = null;      // { from: 'inv'|'slot', invIdx?, wandIdx?, slotIdx?, item }
+    this._dropTargets = [];       // 드롭 가능 영역 배열
+    this._gameRef = null;         // 크래프팅 중 GameScene 참조
+    this._dragListenersActive = false;
   }
 
   // ── 매 프레임 HUD 갱신 ──
@@ -60,21 +64,15 @@ export class UIScene extends Phaser.Scene {
   _refreshSlotsMini(game) {
     this.slotEls.forEach(e => e.destroy());
     this.slotEls = [];
-
     game.wands.forEach((wand, wi) => {
       const baseY = GAME_HEIGHT - 82 + wi * 30;
-
-      // 지팡이 이름
       const nm = this.add.text(14, baseY, `${wand.name}:`, {
         fontSize: '10px', fontFamily: 'monospace', color: '#888'
       }).setDepth(102);
       this.slotEls.push(nm);
-
-      // 슬롯 아이콘
       wand.slots.forEach((slot, si) => {
         const sx = 100 + si * 22;
-        let icon = '·';
-        let color = '#444';
+        let icon = '·', color = '#444';
         if (slot) {
           if (slot.type === 'modifier') { icon = MODIFIERS[slot.id]?.icon || '?'; color = '#aaccff'; }
           else { icon = BASE_SPELLS[slot.id]?.icon || '?'; color = '#fff'; }
@@ -82,12 +80,8 @@ export class UIScene extends Phaser.Scene {
         const t = this.add.text(sx, baseY, icon, { fontSize: '13px', color }).setOrigin(0.5, 0).setDepth(102);
         this.slotEls.push(t);
       });
-
-      // 리차지 표시
       if (wand.isRecharging) {
-        const rc = this.add.text(100 + wand.slotCount * 22 + 5, baseY, '♻️', {
-          fontSize: '10px'
-        }).setDepth(102);
+        const rc = this.add.text(100 + wand.slotCount * 22 + 5, baseY, '♻️', { fontSize: '10px' }).setDepth(102);
         this.slotEls.push(rc);
       }
     });
@@ -107,132 +101,309 @@ export class UIScene extends Phaser.Scene {
   }
 
   // ════════════════════════════════════════════
-  // 크래프팅 UI (TAB)
+  // 크래프팅 UI — 드래그 앤 드롭
   // ════════════════════════════════════════════
   showCrafting(game) {
     this._clearCR();
-    this._crSelected = null;
+    this._gameRef = game;
+    this._dragSource = null;
+    this._dropTargets = [];
+    if (this._dragGhost) { this._dragGhost.destroy(); this._dragGhost = null; }
 
     // 딤 배경
-    const dim = this._rect(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.65, 200);
-    dim.setInteractive(); // 뒤 클릭 방지
+    const dim = this._rect(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.7, 200);
+    dim.setInteractive();
     this._crEls.push(dim);
 
     // 타이틀
-    this._crEls.push(this._txt(GAME_WIDTH / 2, 30, '⚔️ 지팡이 편집', 22, '#fff', 201));
-    this._crEls.push(this._txt(GAME_WIDTH / 2, 55, 'TAB으로 닫기  |  슬롯에 아이템을 배치하세요', 11, '#888', 201));
+    this._crEls.push(this._txt(GAME_WIDTH / 2, 28, '⚔️ 지팡이 편집', 22, '#fff', 201));
+    this._crEls.push(this._txt(GAME_WIDTH / 2, 53, '아이템을 드래그하여 슬롯에 배치  |  TAB으로 닫기', 11, '#888', 201));
 
     // ── 지팡이 영역 ──
-    let wy = 90;
+    let wy = 82;
     game.wands.forEach((wand, wi) => {
+      // 지팡이 제목
       this._crEls.push(this._txt(60, wy, `${wand.name}`, 13, '#aaa', 201).setOrigin(0, 0.5));
-      this._crEls.push(this._txt(200, wy, `⏱${wand.castDelay}ms  ♻️${wand.rechargeTime}ms`, 10, '#666', 201).setOrigin(0, 0.5));
+      this._crEls.push(this._txt(220, wy, `캐스트 ⏱${wand.castDelay}ms   리차지 ♻️${wand.rechargeTime}ms`, 9, '#666', 201).setOrigin(0, 0.5));
+      wy += 24;
 
-      wy += 22;
-
-      // 슬롯
+      // 슬롯 칸들
+      const slotSize = 52;
+      const slotGap = 6;
       wand.slots.forEach((slot, si) => {
-        const sx = 60 + si * 60;
-        // 슬롯 배경
-        const bg = this._rect(sx, wy, 50, 50, 0x1a1a33, 0.9, 201);
-        bg.setStrokeStyle(1.5, slot ? (slot.type === 'modifier' ? 0x5588cc : 0xcc8844) : 0x333366);
-        bg.setInteractive({ useHandCursor: true });
+        const sx = 60 + si * (slotSize + slotGap);
+
+        // 슬롯 배경 (드롭 타겟)
+        const borderColor = slot
+          ? (slot.type === 'modifier' ? 0x5588cc : 0xcc8844)
+          : 0x2a2a55;
+        const bg = this._rect(sx, wy, slotSize, slotSize, 0x111128, 0.95, 201);
+        bg.setStrokeStyle(1.5, borderColor);
         this._crEls.push(bg);
+
+        // 순서 번호
+        this._crEls.push(this._txt(sx - slotSize / 2 + 7, wy - slotSize / 2 + 7, `${si + 1}`, 8, '#333', 202).setOrigin(0.5));
+
+        // 드롭 타겟 등록
+        this._dropTargets.push({
+          type: 'slot', wandIdx: wi, slotIdx: si,
+          x: sx, y: wy, w: slotSize, h: slotSize, bg
+        });
 
         if (slot) {
           const info = slot.type === 'modifier' ? MODIFIERS[slot.id] : BASE_SPELLS[slot.id];
-          const icon = this._txt(sx, wy - 5, info?.icon || '?', 20, '#fff', 202);
-          const label = this._txt(sx, wy + 18, info?.name?.slice(0, 4) || '', 8, '#aaa', 202);
+          const icon = this._txt(sx, wy - 4, info?.icon || '?', 22, '#fff', 203);
+          const label = this._txt(sx, wy + 18, info?.name?.slice(0, 5) || '', 8, '#aaa', 203);
           this._crEls.push(icon, label);
 
-          // 클릭: 슬롯 → 인벤토리로 회수
-          bg.on('pointerdown', () => {
-            game.removeSlotItem(wi, si);
-            this.showCrafting(game); // 리프레시
+          // 드래그 가능하게
+          this._makeDraggable(bg, {
+            from: 'slot', wandIdx: wi, slotIdx: si,
+            item: slot, icon: info?.icon || '?', color: borderColor
           });
         } else {
-          const dot = this._txt(sx, wy, '·', 16, '#444', 202);
-          this._crEls.push(dot);
-
-          // 클릭: 인벤토리 선택 아이템 배치
-          bg.on('pointerdown', () => {
-            if (this._crSelected !== null) {
-              game.placeItem(wi, si, this._crSelected);
-              this._crSelected = null;
-              this.showCrafting(game);
-            }
-          });
+          this._crEls.push(this._txt(sx, wy, '·', 18, '#333', 202));
         }
-
-        // 호버
-        bg.on('pointerover', () => bg.setStrokeStyle(2, 0xffffff));
-        bg.on('pointerout', () => {
-          bg.setStrokeStyle(1.5, slot ? (slot.type === 'modifier' ? 0x5588cc : 0xcc8844) : 0x333366);
-        });
       });
 
-      // 실행 순서 미리보기
-      wy += 32;
-      this._crEls.push(this._txt(60, wy, `실행: ${wand.preview()}`, 10, '#ffdd44', 201).setOrigin(0, 0.5));
-
-      wy += 30;
+      // 실행 미리보기
+      wy += slotSize / 2 + 6;
+      const preview = wand.preview();
+      this._crEls.push(this._txt(60, wy, `▶ ${preview}`, 10, '#ffdd44', 201).setOrigin(0, 0.5));
+      wy += 28;
     });
 
-    // ── 인벤토리 영역 ──
-    const invY = Math.max(wy + 20, 320);
-    this._crEls.push(this._rect(GAME_WIDTH / 2, invY - 10, GAME_WIDTH - 60, 1, 0x333366, 0.5, 201));
-    this._crEls.push(this._txt(60, invY + 5, `📦 인벤토리 (${game.inventory.length})`, 13, '#aaa', 201).setOrigin(0, 0.5));
+    // ── 구분선 ──
+    const sepY = Math.max(wy + 8, 290);
+    this._crEls.push(this._rect(GAME_WIDTH / 2, sepY, GAME_WIDTH - 80, 1, 0x333366, 0.6, 201));
 
+    // ── 인벤토리 영역 ──
+    const invLabelY = sepY + 16;
+    this._crEls.push(this._txt(60, invLabelY, `📦 인벤토리 (${game.inventory.length}/${16})`, 13, '#aaa', 201).setOrigin(0, 0.5));
+    this._crEls.push(this._txt(GAME_WIDTH - 60, invLabelY, '드래그하여 슬롯에 배치', 9, '#555', 201).setOrigin(1, 0.5));
+
+    // 인벤토리 아이템 그리드
     const cols = 8;
+    const itemSize = 52;
+    const itemGap = 6;
+    const invStartY = invLabelY + 22;
+
+    // 인벤토리 영역 배경 (드롭 타겟: 슬롯→인벤토리 회수용)
+    const invRows = Math.max(Math.ceil(game.inventory.length / cols), 2);
+    const invAreaH = invRows * (itemSize + itemGap) + 10;
+    const invAreaBg = this._rect(GAME_WIDTH / 2, invStartY + invAreaH / 2, GAME_WIDTH - 60, invAreaH, 0x0a0a18, 0.5, 200);
+    invAreaBg.setStrokeStyle(1, 0x222244, 0.3);
+    this._crEls.push(invAreaBg);
+    this._dropTargets.push({
+      type: 'inventory',
+      x: GAME_WIDTH / 2, y: invStartY + invAreaH / 2,
+      w: GAME_WIDTH - 60, h: invAreaH, bg: invAreaBg
+    });
+
     game.inventory.forEach((item, idx) => {
       const col = idx % cols;
       const row = Math.floor(idx / cols);
-      const ix = 80 + col * 60;
-      const iy = invY + 30 + row * 60;
+      const ix = 60 + col * (itemSize + itemGap);
+      const iy = invStartY + row * (itemSize + itemGap) + itemSize / 2;
 
-      const isSelected = this._crSelected === idx;
       const info = item.type === 'modifier' ? MODIFIERS[item.id] : BASE_SPELLS[item.id];
-      const borderColor = isSelected ? 0xffffff : (item.type === 'modifier' ? 0x5588cc : 0xcc8844);
+      const borderColor = item.type === 'modifier' ? 0x5588cc : 0xcc8844;
 
-      const bg = this._rect(ix, iy, 50, 50, isSelected ? 0x2a2a55 : 0x1a1a33, 0.9, 201);
-      bg.setStrokeStyle(isSelected ? 2.5 : 1.5, borderColor);
-      bg.setInteractive({ useHandCursor: true });
+      const bg = this._rect(ix, iy, itemSize, itemSize, 0x111128, 0.95, 201);
+      bg.setStrokeStyle(1.5, borderColor);
       this._crEls.push(bg);
 
-      const icon = this._txt(ix, iy - 5, info?.icon || '?', 20, '#fff', 202);
-      const label = this._txt(ix, iy + 18, info?.name?.slice(0, 4) || '', 8, '#aaa', 202);
+      const icon = this._txt(ix, iy - 4, info?.icon || '?', 22, '#fff', 203);
+      const label = this._txt(ix, iy + 18, info?.name?.slice(0, 5) || '', 8, '#aaa', 203);
       this._crEls.push(icon, label);
 
-      bg.on('pointerdown', () => {
-        this._crSelected = isSelected ? null : idx;
-        this.showCrafting(game); // 리프레시
+      // 드래그 가능하게
+      this._makeDraggable(bg, {
+        from: 'inv', invIdx: idx,
+        item: item, icon: info?.icon || '?', color: borderColor
       });
-
-      bg.on('pointerover', () => bg.setStrokeStyle(2, 0xffffff));
-      bg.on('pointerout', () => bg.setStrokeStyle(isSelected ? 2.5 : 1.5, borderColor));
     });
 
-    // ── 선택 아이템 정보 ──
-    if (this._crSelected !== null && game.inventory[this._crSelected]) {
-      const sel = game.inventory[this._crSelected];
-      const info = sel.type === 'modifier' ? MODIFIERS[sel.id] : BASE_SPELLS[sel.id];
-      const infoY = invY + 30 + Math.ceil(game.inventory.length / cols) * 60 + 10;
-
-      const badge = sel.type === 'modifier' ? '[모디파이어]' : '[주문]';
-      this._crEls.push(this._txt(GAME_WIDTH / 2, infoY, `${info?.icon} ${info?.name}  ${badge}`, 14, '#fff', 201));
-      this._crEls.push(this._txt(GAME_WIDTH / 2, infoY + 20, info?.desc || '', 11, '#aaa', 201));
-      this._crEls.push(this._txt(GAME_WIDTH / 2, infoY + 38, '↑ 위의 빈 슬롯을 클릭하여 배치', 10, '#ffdd44', 201));
+    // 빈 인벤토리 안내
+    if (game.inventory.length === 0) {
+      this._crEls.push(this._txt(GAME_WIDTH / 2, invStartY + 30, '인벤토리가 비어 있습니다', 12, '#444', 201));
+      this._crEls.push(this._txt(GAME_WIDTH / 2, invStartY + 50, '적을 처치하고 레벨업하여 아이템을 획득하세요', 10, '#333', 201));
     }
+
+    // ── 툴팁 영역 ──
+    this._tooltipEl = null;
+  }
+
+  /** 아이템에 드래그 기능 부착 */
+  _makeDraggable(bg, sourceData) {
+    bg.setInteractive({ useHandCursor: true });
+
+    bg.on('pointerdown', (pointer) => {
+      this._dragSource = sourceData;
+
+      // 고스트 생성
+      if (this._dragGhost) this._dragGhost.destroy();
+      this._dragGhost = this.add.text(pointer.x, pointer.y, sourceData.icon, {
+        fontSize: '28px'
+      }).setOrigin(0.5).setScrollFactor(0).setDepth(400).setAlpha(0.85);
+
+      // 드롭 타겟 하이라이트
+      this._dropTargets.forEach(dt => {
+        if (dt.type === 'slot') {
+          dt.bg.setStrokeStyle(2, 0x44ff44, 0.6);
+        } else if (dt.type === 'inventory' && sourceData.from === 'slot') {
+          dt.bg.setStrokeStyle(2, 0x44ff44, 0.3);
+        }
+      });
+    });
+
+    bg.on('pointerover', () => {
+      if (!this._dragSource) {
+        bg.setStrokeStyle(2, 0xffffff);
+        // 툴팁
+        this._showTooltip(sourceData);
+      }
+    });
+    bg.on('pointerout', () => {
+      if (!this._dragSource) {
+        const c = sourceData.item.type === 'modifier' ? 0x5588cc : 0xcc8844;
+        bg.setStrokeStyle(1.5, c);
+        this._hideTooltip();
+      }
+    });
+  }
+
+  /** 씬 생성 후 글로벌 포인터 이벤트 (showCrafting 호출 시 등록) */
+  _setupDragListeners() {
+    // 이미 등록되어있으면 스킵
+    if (this._dragListenersActive) return;
+    this._dragListenersActive = true;
+
+    this.input.on('pointermove', (pointer) => {
+      if (this._dragGhost && this._dragSource) {
+        this._dragGhost.setPosition(pointer.x, pointer.y);
+
+        // 드롭 타겟 호버 하이라이트
+        this._dropTargets.forEach(dt => {
+          const inTarget = this._isInRect(pointer.x, pointer.y, dt);
+          if (dt.type === 'slot') {
+            dt.bg.setStrokeStyle(2, inTarget ? 0xffffff : 0x44ff44, inTarget ? 1 : 0.6);
+          }
+        });
+      }
+    });
+
+    this.input.on('pointerup', (pointer) => {
+      if (!this._dragSource || !this._dragGhost) return;
+
+      const source = this._dragSource;
+      let dropped = false;
+
+      // 어느 드롭 타겟 위에 놓았는지 확인
+      for (const dt of this._dropTargets) {
+        if (!this._isInRect(pointer.x, pointer.y, dt)) continue;
+
+        if (dt.type === 'slot' && source.from === 'inv') {
+          // 인벤토리 → 슬롯
+          this._gameRef.placeItem(dt.wandIdx, dt.slotIdx, source.invIdx);
+          dropped = true;
+          break;
+        }
+        if (dt.type === 'slot' && source.from === 'slot') {
+          // 슬롯 → 다른 슬롯 (스왑)
+          this._swapSlots(source.wandIdx, source.slotIdx, dt.wandIdx, dt.slotIdx);
+          dropped = true;
+          break;
+        }
+        if (dt.type === 'inventory' && source.from === 'slot') {
+          // 슬롯 → 인벤토리 (회수)
+          this._gameRef.removeSlotItem(source.wandIdx, source.slotIdx);
+          dropped = true;
+          break;
+        }
+      }
+
+      // 정리
+      this._dragGhost.destroy();
+      this._dragGhost = null;
+      this._dragSource = null;
+
+      // UI 리프레시
+      if (dropped && this._gameRef) {
+        this.showCrafting(this._gameRef);
+      } else {
+        // 드롭 안 된 경우 하이라이트 리셋
+        this._dropTargets.forEach(dt => {
+          if (dt.type === 'slot') {
+            const wand = this._gameRef.wands[dt.wandIdx];
+            const slot = wand?.slots[dt.slotIdx];
+            dt.bg.setStrokeStyle(1.5, slot
+              ? (slot.type === 'modifier' ? 0x5588cc : 0xcc8844)
+              : 0x2a2a55);
+          } else if (dt.type === 'inventory') {
+            dt.bg.setStrokeStyle(1, 0x222244, 0.3);
+          }
+        });
+      }
+    });
+  }
+
+  _swapSlots(fromWandIdx, fromSlotIdx, toWandIdx, toSlotIdx) {
+    const game = this._gameRef;
+    const fromWand = game.wands[fromWandIdx];
+    const toWand = game.wands[toWandIdx];
+    if (!fromWand || !toWand) return;
+
+    const temp = fromWand.slots[fromSlotIdx];
+    fromWand.slots[fromSlotIdx] = toWand.slots[toSlotIdx];
+    toWand.slots[toSlotIdx] = temp;
+    fromWand.reset();
+    toWand.reset();
+  }
+
+  _isInRect(px, py, dt) {
+    return px >= dt.x - dt.w / 2 && px <= dt.x + dt.w / 2 &&
+           py >= dt.y - dt.h / 2 && py <= dt.y + dt.h / 2;
+  }
+
+  // ── 툴팁 ──
+  _showTooltip(sourceData) {
+    this._hideTooltip();
+    const item = sourceData.item;
+    const info = item.type === 'modifier' ? MODIFIERS[item.id] : BASE_SPELLS[item.id];
+    if (!info) return;
+
+    const badge = item.type === 'modifier' ? '[모디파이어]' : '[주문]';
+    const tipText = `${info.icon} ${info.name}  ${badge}\n${info.desc || ''}`;
+
+    this._tooltipEl = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT - 50, tipText, {
+      fontSize: '11px', fontFamily: 'monospace', color: '#ddd',
+      backgroundColor: '#111128', padding: { x: 10, y: 6 },
+      align: 'center', stroke: '#000', strokeThickness: 1
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(300);
+  }
+
+  _hideTooltip() {
+    if (this._tooltipEl) { this._tooltipEl.destroy(); this._tooltipEl = null; }
   }
 
   hideCrafting() {
     this._clearCR();
-    this._crSelected = null;
+    this._dragSource = null;
+    this._dropTargets = [];
+    if (this._dragGhost) { this._dragGhost.destroy(); this._dragGhost = null; }
+    this._hideTooltip();
   }
 
   _clearCR() {
     this._crEls.forEach(e => e.destroy());
     this._crEls = [];
+  }
+
+  // showCrafting을 호출할 때 드래그 리스너도 등록
+  showCraftingFull(game) {
+    this._setupDragListeners();
+    this.showCrafting(game);
   }
 
   // ════════════════════════════════════════════
@@ -259,7 +430,6 @@ export class UIScene extends Phaser.Scene {
       card.setInteractive({ useHandCursor: true });
       this._luEls.push(card);
 
-      // 타입 뱃지
       const badges = { spell: '[주문]', modifier: '[모디파이어]', wand: '[지팡이]', passive: '[패시브]' };
       const bColors = { spell: '#88ff88', modifier: '#88ccff', wand: '#ffaa44', passive: '#ff8888' };
       this._luEls.push(this._txt(cx, cy - 65, badges[c.type] || '', 10, bColors[c.type] || '#aaa', 202));

@@ -184,7 +184,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (this.uiScene?.scene.isActive()) {
-      if (this.isCrafting) this.uiScene.showCrafting(this);
+      if (this.isCrafting) this.uiScene.showCraftingFull(this);
       else this.uiScene.hideCrafting();
     }
   }
