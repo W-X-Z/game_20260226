@@ -6,6 +6,10 @@ import { ENEMY_TYPES } from '../config.js';
 export class BootScene extends Phaser.Scene {
   constructor() { super('BootScene'); }
 
+  preload() {
+    this.load.audio('bgm', 'bgm.mp3');
+  }
+
   create() {
     this.generateTextures();
     this.scene.start('MenuScene');
@@ -15,6 +19,7 @@ export class BootScene extends Phaser.Scene {
     this._makePlayer();
     this._makeProjectiles();
     this._makeParticles();
+    this._makeDrops();
     this._makeEnemies();
     this._makeUI();
   }
@@ -71,6 +76,25 @@ export class BootScene extends Phaser.Scene {
       g.fillStyle(0xccaa44); g.fillRect(4, 4, s - 2, s - 2);
       g.lineStyle(1.5, 0x886622); g.strokeRect(2, 2, s * 2 - 4, s * 2 - 4);
     });
+    // ✴️ 마력탄 - 작은 밝은 점
+    this._drawProj('proj_spark', 5, (g, s) => {
+      g.fillStyle(0xcc88ff, 0.6); g.fillCircle(s, s, s);
+      g.fillStyle(0xeeccff); g.fillCircle(s, s, s * 0.4);
+    });
+    // 🌑 공허구 - 어두운 큰 원 + 소용돌이
+    this._drawProj('proj_void', 20, (g, s) => {
+      g.fillStyle(0x220044, 0.7); g.fillCircle(s, s, s);
+      g.fillStyle(0x6622aa, 0.5); g.fillCircle(s, s, s * 0.7);
+      g.lineStyle(2, 0x9944ff, 0.5); g.strokeCircle(s, s, s * 0.85);
+      g.fillStyle(0x000000, 0.6); g.fillCircle(s, s, s * 0.3);
+    });
+    // 💫 노바 - 작은 별
+    this._drawProj('proj_nova', 8, (g, s) => {
+      g.fillStyle(0xff88ff); g.fillCircle(s, s, s * 0.5);
+      g.fillStyle(0xffccff, 0.7);
+      g.fillRect(s - 1, 0, 2, s * 2);
+      g.fillRect(0, s - 1, s * 2, 2);
+    });
     // 범용 투사체
     const bl = this.make.graphics({ add: false });
     bl.fillStyle(0xffffff); bl.fillCircle(4, 4, 4);
@@ -93,6 +117,35 @@ export class BootScene extends Phaser.Scene {
     xp.fillStyle(0xaaffcc); xp.fillCircle(4, 3, 2.5);
     xp.lineStyle(1, 0xffffff, 0.3); xp.strokeCircle(5, 5, 5);
     xp.generateTexture('xp_orb', 10, 10);
+  }
+
+  _makeDrops() {
+    const g = this.make.graphics({ add: false });
+    g.fillStyle(0xffffff);
+    g.beginPath();
+    g.moveTo(10, 0);
+    g.lineTo(18, 8);
+    g.lineTo(10, 18);
+    g.lineTo(2, 8);
+    g.closePath();
+    g.fillPath();
+    g.fillStyle(0xffffff, 0.45);
+    g.beginPath();
+    g.moveTo(10, 2);
+    g.lineTo(15, 8);
+    g.lineTo(10, 11);
+    g.lineTo(5, 8);
+    g.closePath();
+    g.fillPath();
+    g.lineStyle(1.5, 0xffffff, 0.7);
+    g.beginPath();
+    g.moveTo(10, 0);
+    g.lineTo(18, 8);
+    g.lineTo(10, 18);
+    g.lineTo(2, 8);
+    g.closePath();
+    g.strokePath();
+    g.generateTexture('item_drop', 20, 18);
   }
 
   _makeEnemies() {

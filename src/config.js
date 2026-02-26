@@ -8,9 +8,15 @@ export const GAME_HEIGHT = 768;
 export const WORLD_SIZE = 4000;
 export const PLAYER_SPEED = 200;
 export const PLAYER_MAX_HP = 100;
-export const XP_PER_LEVEL_BASE = 10;
-export const XP_LEVEL_SCALE = 1.2;
+export const XP_PER_LEVEL_BASE = 20;
+export const XP_LEVEL_SCALE = 1.3;
 export const MAX_INVENTORY = 16;
+
+// ===== 아이템 드롭 =====
+export const DROP_RATE_NORMAL = 0.08;
+export const DROP_RATE_BOSS = 1.0;
+export const BOSS_DROP_COUNT = 3;
+export const DROP_LIFETIME = 12000;
 
 // ===== 지팡이 템플릿 =====
 // Noita 스타일: 슬롯 수, 캐스트 딜레이, 리차지 타임
@@ -62,6 +68,26 @@ export const BASE_SPELLS = {
     color: 0xccaa44, damage: 30, speed: 170, size: 16,
     lifetime: 2200, texKey: 'proj_rock',
     desc: '느리지만 강력한 바위'
+  },
+  spark_bolt: {
+    id: 'spark_bolt', name: '마력탄', icon: '✴️',
+    color: 0xcc88ff, damage: 4, speed: 500, size: 4,
+    lifetime: 400, texKey: 'proj_spark',
+    desc: '초고속 소형 마력탄 — 속사 빌드용'
+  },
+  void_orb: {
+    id: 'void_orb', name: '공허구', icon: '🌑',
+    color: 0x6622aa, damage: 12, speed: 80, size: 18,
+    lifetime: 3000, texKey: 'proj_void',
+    gravity: true,
+    desc: '주변 적을 끌어당기는 느린 구체'
+  },
+  nova: {
+    id: 'nova', name: '노바', icon: '💫',
+    color: 0xff88ff, damage: 8, speed: 250, size: 6,
+    lifetime: 600, texKey: 'proj_nova',
+    castPattern: 'radial',
+    desc: '전방위 8발 방사형 발사'
   }
 };
 
@@ -115,6 +141,30 @@ export const MODIFIERS = {
   trigger: {
     id: 'trigger', name: '연발', icon: '🔄',
     desc: '처치 시 해당 위치에서 재발사', color: 0x44ff44, maxStack: 1
+  },
+  leech: {
+    id: 'leech', name: '흡혈', icon: '🩸',
+    desc: '명중 시 피해의 15% 회복', color: 0xcc2244, maxStack: 3
+  },
+  gravity_well: {
+    id: 'gravity_well', name: '중력장', icon: '🕳️',
+    desc: '투사체가 주변 적을 끌어당김', color: 0x4422aa, maxStack: 2
+  },
+  double_cast: {
+    id: 'double_cast', name: '이중시전', icon: '🔁',
+    desc: '투사체 +1개 (집중)', color: 0xff88ff, maxStack: 2
+  },
+  timer_split: {
+    id: 'timer_split', name: '시한분열', icon: '⏰',
+    desc: '0.4초 후 3갈래로 분열', color: 0xffaa22, maxStack: 1
+  },
+  bounce: {
+    id: 'bounce', name: '반사', icon: '🔲',
+    desc: '원거리에서 2회 반사, 재명중 가능', color: 0x44aaff, maxStack: 3
+  },
+  enlarge: {
+    id: 'enlarge', name: '거대화', icon: '🔍',
+    desc: '시간에 따라 크기·위력 증가', color: 0xeeaa44, maxStack: 2
   }
 };
 
@@ -141,5 +191,9 @@ export const WAVE_CONFIG = [
   { time: 180, types: ['skeleton', 'golem', 'mage'],          rate: 700,  max: 40, boss: true },
   { time: 210, types: ['golem', 'mage', 'swarm', 'ghost'],    rate: 600,  max: 50 },
   { time: 240, types: ['golem', 'mage', 'swarm', 'skeleton'], rate: 500,  max: 60, boss: true },
-  { time: 300, types: ['golem', 'mage', 'swarm', 'ghost'],    rate: 400,  max: 80, boss: true }
+  { time: 300, types: ['golem', 'mage', 'swarm', 'ghost'],    rate: 400,  max: 80, boss: true },
+  { time: 360, types: ['golem', 'mage', 'swarm', 'skeleton', 'ghost'], rate: 350, max: 100, boss: true },
+  { time: 420, types: ['golem', 'mage', 'swarm', 'skeleton', 'ghost'], rate: 300, max: 120, boss: true },
+  { time: 480, types: ['golem', 'mage', 'swarm', 'skeleton', 'ghost'], rate: 250, max: 150, boss: true },
+  { time: 540, types: ['golem', 'mage', 'swarm', 'skeleton', 'ghost'], rate: 200, max: 180, boss: true }
 ];

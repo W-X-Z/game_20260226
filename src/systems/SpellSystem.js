@@ -85,9 +85,16 @@ export function computeParams(spellId, modifiers, level) {
     explode: false, explodeR: 0,
     rapid: false, rapidMul: 1,
     onHit: b.onHit,
+    castPattern: b.castPattern || null,
+    gravity: !!b.gravity,
+    gravityStr: b.gravity ? 200 : 0,
+    leech: 0,
+    bounce: 0,
+    enlarge: false,
+    enlargeScale: 0,
+    timerSplit: false,
   };
 
-  // 모디파이어 스택 수 세기 (같은 모디파이어 여러개)
   for (const id of modifiers) {
     switch (id) {
       case 'multi_shot': p.count += 2; p.spread = Math.min(p.spread + 0.2, 1.2); p.damage *= 0.85; break;
@@ -102,6 +109,12 @@ export function computeParams(spellId, modifiers, level) {
       case 'heavy':      p.damage *= 1.6; p.speed *= 0.75; p.size *= 1.3; break;
       case 'trail':      p.trail = true; break;
       case 'trigger':    p.trigger = true; break;
+      case 'leech':       p.leech += 0.15; break;
+      case 'gravity_well': p.gravity = true; p.gravityStr += 180; break;
+      case 'double_cast': p.count += 1; p.spread = Math.max(p.spread, 0.05); break;
+      case 'timer_split': p.timerSplit = true; break;
+      case 'bounce':      p.bounce += 2; p.lifetime += 400; break;
+      case 'enlarge':     p.enlarge = true; p.enlargeScale += 1.0; break;
     }
   }
   return p;
@@ -160,7 +173,10 @@ export class SpellSystem {
 
     const baseAngle = Math.atan2(ty - py, tx - px);
 
-    if (params.orbit) {
+    if (params.castPattern === 'radial') {
+      const n = Math.max(params.count * 4, 8);
+      for (let i = 0; i < n; i++) this._spawnProj(params, px, py, (Math.PI * 2 / n) * i);
+    } else if (params.orbit) {
       this._spawnOrbit(params, px, py);
     } else {
       for (let i = 0; i < params.count; i++) {
@@ -302,8 +318,58 @@ export class SpellSystem {
         this._createZone(proj.sprite.x, proj.sprite.y, 18, proj.params.damage * 0.2, 1000, proj.params.color, null);
       }
 
-      // 화면 밖
-      if (player && dist(player, proj.sprite) > 850) { this._destroy(proj); return false; }
+      // 중력장
+      if (proj.params.gravity) {
+        this.scene.enemies.getChildren().forEach(e => {
+          if (!e.active || !e.body) return;
+          const gd = dist(proj.sprite, e);
+          if (gd < 160 && gd > 10) {
+            const ga = angleTo(e, proj.sprite);
+            const pull = proj.params.gravityStr * (1 - gd / 160);
+            e.body.velocity.x += Math.cos(ga) * pull * (delta / 1000);
+            e.body.velocity.y += Math.sin(ga) * pull * (delta / 1000);
+          }
+        });
+      }
+
+      // 시한분열
+      if (proj.params.timerSplit && !proj._hasSplit) {
+        if (elapsed > 400) {
+          proj._hasSplit = true;
+          const curA = Math.atan2(proj.sprite.body.velocity.y, proj.sprite.body.velocity.x);
+          const sp = { ...proj.params, timerSplit: false };
+          for (let i = 0; i < 3; i++) {
+            this._spawnProj(sp, proj.sprite.x, proj.sprite.y, curA + (i - 1) * 0.6);
+          }
+          this._destroy(proj);
+          return false;
+        }
+      }
+
+      // 거대화
+      if (proj.params.enlarge && proj.sprite.setScale) {
+        const et = Math.min(elapsed / proj.params.lifetime, 1);
+        proj.sprite.setScale(1 + et * proj.params.enlargeScale);
+        if (!proj._baseDmg) proj._baseDmg = proj.params.damage;
+        proj.params.damage = proj._baseDmg * (1 + et * proj.params.enlargeScale * 0.5);
+      }
+
+      // 화면 밖 (반사 / 소멸)
+      if (player && dist(player, proj.sprite) > 850) {
+        if (proj.params.bounce > 0) {
+          proj.sprite.body.velocity.x *= -1;
+          proj.sprite.body.velocity.y *= -1;
+          proj.params = { ...proj.params, bounce: proj.params.bounce - 1 };
+          proj.hitEnemies.clear();
+          const ba = angleTo(proj.sprite, player);
+          proj.sprite.setPosition(
+            proj.sprite.x + Math.cos(ba) * 40,
+            proj.sprite.y + Math.sin(ba) * 40
+          );
+        } else {
+          this._destroy(proj); return false;
+        }
+      }
       return true;
     });
 
@@ -330,53 +396,61 @@ export class SpellSystem {
     if (proj.hitEnemies.has(enemy)) return;
     proj.hitEnemies.add(enemy);
     const p = proj.params;
+    const ex = enemy.x, ey = enemy.y;
 
-    // 1) 데미지
+    // 1) 데미지 (적이 사망할 수 있음)
     this.scene.damageEnemy(enemy, p.damage);
 
-    // 2) 고유 효과
-    if (p.onHit === 'slow') {
-      enemy.slowUntil = this.scene.time.now + 1500;
-      enemy.setTint(0x88ccff);
-      this.scene.time.delayedCall(1500, () => { if (enemy.active) enemy.clearTint(); });
+    // 흡혈
+    if (p.leech > 0) {
+      this.scene.playerHP = Math.min(this.scene.playerHP + p.damage * p.leech, this.scene.playerMaxHP);
     }
-    if (p.onHit === 'knockback') {
-      const a = angleTo(proj.sprite, enemy);
-      enemy.body.velocity.x += Math.cos(a) * 220;
-      enemy.body.velocity.y += Math.sin(a) * 220;
-    }
-    if (p.onHit === 'poison_zone') {
-      this._createZone(enemy.x, enemy.y, 42, p.damage * 0.5, 2500, 0x44ff44, 'slow');
+
+    // 2) 고유 효과 (적 생존 시에만)
+    if (enemy.active) {
+      if (p.onHit === 'slow') {
+        enemy.slowUntil = this.scene.time.now + 1500;
+        enemy.setTint(0x88ccff);
+        this.scene.time.delayedCall(1500, () => { if (enemy.active) enemy.clearTint(); });
+      }
+      if (p.onHit === 'knockback' && enemy.body) {
+        const a = angleTo(proj.sprite, enemy);
+        enemy.body.velocity.x += Math.cos(a) * 220;
+        enemy.body.velocity.y += Math.sin(a) * 220;
+      }
+      if (p.onHit === 'poison_zone') {
+        this._createZone(ex, ey, 42, p.damage * 0.5, 2500, 0x44ff44, 'slow');
+      }
     }
 
     // 3) 폭발
-    if (p.explode) this._explode(enemy.x, enemy.y, p.explodeR, p.damage * 0.5, p.color);
+    if (p.explode) this._explode(ex, ey, p.explodeR, p.damage * 0.5, p.color);
 
     // 4) 연발 (처치 시 재발사)
-    if (p.trigger && enemy.hp <= 0) {
-      const next = this._nearest(enemy.x, enemy.y, new Set([enemy]));
+    if (p.trigger && !enemy.active) {
+      const next = this._nearest(ex, ey, new Set([enemy]));
       if (next) {
         const tp = { ...p, trigger: false, fork: 0, chain: 0, damage: p.damage * 0.6 };
-        this._spawnProj(tp, enemy.x, enemy.y, angleTo(enemy, next));
+        this._spawnProj(tp, ex, ey, angleTo({ x: ex, y: ey }, next));
       }
     }
 
     // 5) 투사체 운명: 분열 > 연쇄 > 관통 > 소멸
     if (p.fork > 0) {
-      const ba = angleTo(proj.sprite, enemy);
+      const ba = angleTo(proj.sprite, { x: ex, y: ey });
       for (let i = 0; i < 2; i++) {
         const fp = { ...p, fork: p.fork - 1, damage: p.damage * 0.6 };
-        this._spawnProj(fp, enemy.x, enemy.y, ba + (i === 0 ? -0.5 : 0.5));
+        this._spawnProj(fp, ex, ey, ba + (i === 0 ? -0.5 : 0.5));
       }
       this._destroy(proj);
     } else if (p.chain > 0) {
-      const next = this._nearest(enemy.x, enemy.y, proj.hitEnemies);
-      if (next) {
-        const a = angleTo(proj.sprite, next);
-        proj.sprite.setPosition(enemy.x, enemy.y);
+      const next = this._nearest(ex, ey, proj.hitEnemies);
+      if (next && proj.sprite?.active) {
+        const a = angleTo({ x: ex, y: ey }, next);
+        proj.sprite.setPosition(ex, ey);
         proj.sprite.setVelocity(Math.cos(a) * p.speed, Math.sin(a) * p.speed);
         proj.params = { ...p, chain: p.chain - 1 };
-        this._chainFX(enemy.x, enemy.y, next.x, next.y, p.color);
+        this._chainFX(ex, ey, next.x, next.y, p.color);
       } else { this._destroy(proj); }
     } else if (p.pierce > 0) {
       proj.params = { ...p, pierce: p.pierce - 1 };
@@ -389,6 +463,7 @@ export class SpellSystem {
   _castFX(x, y, color) {
     const r = this.scene.add.circle(x, y, 8, color, 0.35).setDepth(12);
     this.scene.tweens.add({ targets: r, scaleX: 2.5, scaleY: 2.5, alpha: 0, duration: 180, onComplete: () => r.destroy() });
+    this.scene.sfx?.shoot();
   }
 
   _explode(x, y, radius, damage, color) {

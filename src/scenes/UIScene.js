@@ -227,7 +227,77 @@ export class UIScene extends Phaser.Scene {
     // 빈 인벤토리 안내
     if (game.inventory.length === 0) {
       this._crEls.push(this._txt(GAME_WIDTH / 2, invStartY + 30, '인벤토리가 비어 있습니다', 12, '#444', 201));
-      this._crEls.push(this._txt(GAME_WIDTH / 2, invStartY + 50, '적을 처치하고 레벨업하여 아이템을 획득하세요', 10, '#333', 201));
+      this._crEls.push(this._txt(GAME_WIDTH / 2, invStartY + 50, '적을 처치하여 아이템을 획득하세요', 10, '#333', 201));
+    }
+
+    // ── 조합 영역 ──
+    const fusionSepY = invStartY + invAreaH + 12;
+    this._crEls.push(this._rect(GAME_WIDTH / 2, fusionSepY, GAME_WIDTH - 80, 1, 0x333366, 0.6, 201));
+
+    const fusionLabelY = fusionSepY + 18;
+    this._crEls.push(this._txt(60, fusionLabelY, '🔮 아이템 조합 (3개 → 1개)', 13, '#aaa', 201).setOrigin(0, 0.5));
+    this._crEls.push(this._txt(GAME_WIDTH - 60, fusionLabelY, '같은 아이템 3개 = 다른 종류 확정', 9, '#555', 201).setOrigin(1, 0.5));
+
+    const fusionSlotY = fusionLabelY + 36;
+    const fusionGap = 6;
+
+    game.fusionSlots.forEach((slot, fi) => {
+      const fx = 60 + fi * (itemSize + fusionGap);
+      const borderColor = slot ? 0xaa44ff : 0x2a2a55;
+      const bg = this._rect(fx, fusionSlotY, itemSize, itemSize, 0x111128, 0.95, 201);
+      bg.setStrokeStyle(1.5, borderColor);
+      this._crEls.push(bg);
+
+      this._dropTargets.push({
+        type: 'fusion', fusionIdx: fi,
+        x: fx, y: fusionSlotY, w: itemSize, h: itemSize, bg
+      });
+
+      if (slot) {
+        const info = slot.type === 'modifier' ? MODIFIERS[slot.id] : BASE_SPELLS[slot.id];
+        this._crEls.push(this._txt(fx, fusionSlotY - 4, info?.icon || '?', 22, '#fff', 203));
+        this._crEls.push(this._txt(fx, fusionSlotY + 18, info?.name?.slice(0, 5) || '', 8, '#aaa', 203));
+        this._makeDraggable(bg, {
+          from: 'fusion', fusionIdx: fi,
+          item: slot, icon: info?.icon || '?', color: 0xaa44ff
+        });
+      }
+    });
+
+    const arrowX = 60 + 3 * (itemSize + fusionGap);
+    this._crEls.push(this._txt(arrowX, fusionSlotY, '→', 22, '#666', 201));
+
+    const resultX = arrowX + 40;
+    const resultBg = this._rect(resultX, fusionSlotY, itemSize, itemSize, 0x111128, 0.95, 201);
+    resultBg.setStrokeStyle(1.5, 0x333355);
+    this._crEls.push(resultBg);
+    this._crEls.push(this._txt(resultX, fusionSlotY, '?', 24, '#444', 202));
+
+    const allFusionFilled = game.fusionSlots.every(s => s !== null);
+    const btnX = resultX + itemSize / 2 + 50;
+    const btnColor = allFusionFilled ? 0x6644aa : 0x333333;
+    const fusionBtn = this._rect(btnX, fusionSlotY, 80, 40, btnColor, 0.9, 201);
+    fusionBtn.setStrokeStyle(1, allFusionFilled ? 0xaa88ff : 0x444444);
+    this._crEls.push(fusionBtn);
+    this._crEls.push(this._txt(btnX, fusionSlotY, '조합!', 14, allFusionFilled ? '#fff' : '#555', 202));
+
+    if (allFusionFilled) {
+      fusionBtn.setInteractive({ useHandCursor: true });
+      fusionBtn.on('pointerover', () => { fusionBtn.setFillStyle(0x8855cc); fusionBtn.setStrokeStyle(2, 0xffffff); });
+      fusionBtn.on('pointerout', () => { fusionBtn.setFillStyle(0x6644aa); fusionBtn.setStrokeStyle(1, 0xaa88ff); });
+      fusionBtn.on('pointerdown', () => {
+        const result = game.executeFusion();
+        if (result) {
+          if (game.inventory.length < 16) {
+            game.inventory.push(result);
+          }
+          const info = result.type === 'modifier' ? MODIFIERS[result.id] : BASE_SPELLS[result.id];
+          game.sfx?.fusion();
+          const flash = this._rect(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0xaa44ff, 0.3, 250);
+          this.tweens.add({ targets: flash, alpha: 0, duration: 300, onComplete: () => flash.destroy() });
+        }
+        this.showCrafting(game);
+      });
     }
 
     // ── 툴팁 영역 ──
@@ -249,9 +319,9 @@ export class UIScene extends Phaser.Scene {
 
       // 드롭 타겟 하이라이트
       this._dropTargets.forEach(dt => {
-        if (dt.type === 'slot') {
+        if (dt.type === 'slot' || dt.type === 'fusion') {
           dt.bg.setStrokeStyle(2, 0x44ff44, 0.6);
-        } else if (dt.type === 'inventory' && sourceData.from === 'slot') {
+        } else if (dt.type === 'inventory' && (sourceData.from === 'slot' || sourceData.from === 'fusion')) {
           dt.bg.setStrokeStyle(2, 0x44ff44, 0.3);
         }
       });
@@ -286,7 +356,7 @@ export class UIScene extends Phaser.Scene {
         // 드롭 타겟 호버 하이라이트
         this._dropTargets.forEach(dt => {
           const inTarget = this._isInRect(pointer.x, pointer.y, dt);
-          if (dt.type === 'slot') {
+          if (dt.type === 'slot' || dt.type === 'fusion') {
             dt.bg.setStrokeStyle(2, inTarget ? 0xffffff : 0x44ff44, inTarget ? 1 : 0.6);
           }
         });
@@ -304,22 +374,28 @@ export class UIScene extends Phaser.Scene {
         if (!this._isInRect(pointer.x, pointer.y, dt)) continue;
 
         if (dt.type === 'slot' && source.from === 'inv') {
-          // 인벤토리 → 슬롯
           this._gameRef.placeItem(dt.wandIdx, dt.slotIdx, source.invIdx);
-          dropped = true;
-          break;
+          dropped = true; break;
         }
         if (dt.type === 'slot' && source.from === 'slot') {
-          // 슬롯 → 다른 슬롯 (스왑)
           this._swapSlots(source.wandIdx, source.slotIdx, dt.wandIdx, dt.slotIdx);
-          dropped = true;
-          break;
+          dropped = true; break;
         }
         if (dt.type === 'inventory' && source.from === 'slot') {
-          // 슬롯 → 인벤토리 (회수)
           this._gameRef.removeSlotItem(source.wandIdx, source.slotIdx);
-          dropped = true;
-          break;
+          dropped = true; break;
+        }
+        if (dt.type === 'fusion' && source.from === 'inv') {
+          this._gameRef.placeFusionItem(dt.fusionIdx, source.invIdx);
+          dropped = true; break;
+        }
+        if (dt.type === 'fusion' && source.from === 'fusion') {
+          this._swapFusion(source.fusionIdx, dt.fusionIdx);
+          dropped = true; break;
+        }
+        if (dt.type === 'inventory' && source.from === 'fusion') {
+          this._gameRef.removeFusionItem(source.fusionIdx);
+          dropped = true; break;
         }
       }
 
@@ -342,6 +418,9 @@ export class UIScene extends Phaser.Scene {
               : 0x2a2a55);
           } else if (dt.type === 'inventory') {
             dt.bg.setStrokeStyle(1, 0x222244, 0.3);
+          } else if (dt.type === 'fusion') {
+            const fSlot = this._gameRef?.fusionSlots[dt.fusionIdx];
+            dt.bg.setStrokeStyle(1.5, fSlot ? 0xaa44ff : 0x2a2a55);
           }
         });
       }
@@ -359,6 +438,13 @@ export class UIScene extends Phaser.Scene {
     toWand.slots[toSlotIdx] = temp;
     fromWand.reset();
     toWand.reset();
+  }
+
+  _swapFusion(fromIdx, toIdx) {
+    const game = this._gameRef;
+    const temp = game.fusionSlots[fromIdx];
+    game.fusionSlots[fromIdx] = game.fusionSlots[toIdx];
+    game.fusionSlots[toIdx] = temp;
   }
 
   _isInRect(px, py, dt) {
@@ -415,7 +501,7 @@ export class UIScene extends Phaser.Scene {
     this._luEls.push(dim);
 
     this._luEls.push(this._txt(GAME_WIDTH / 2, 100, `⬆️ 레벨 ${game.playerLevel}!`, 28, '#ffff44', 201));
-    this._luEls.push(this._txt(GAME_WIDTH / 2, 132, '인벤토리에 추가할 아이템을 선택하세요', 12, '#999', 201));
+    this._luEls.push(this._txt(GAME_WIDTH / 2, 132, '패시브를 선택하세요', 12, '#999', 201));
 
     const cw = 240, ch = 190, gap = 22;
     const total = choices.length * cw + (choices.length - 1) * gap;

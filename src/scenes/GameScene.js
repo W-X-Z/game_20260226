@@ -6,9 +6,10 @@ import {
   PLAYER_SPEED, PLAYER_MAX_HP,
   XP_PER_LEVEL_BASE, XP_LEVEL_SCALE,
   BASE_SPELLS, MODIFIERS, WAND_TEMPLATES,
-  MAX_INVENTORY
+  MAX_INVENTORY,
+  DROP_RATE_NORMAL, DROP_RATE_BOSS, BOSS_DROP_COUNT, DROP_LIFETIME
 } from '../config.js';
-import { dist, angleTo, shuffle } from '../utils.js';
+import { dist, angleTo, shuffle, SFX } from '../utils.js';
 import { SpellSystem, Wand } from '../systems/SpellSystem.js';
 import { EnemySystem } from '../systems/EnemySystem.js';
 
@@ -29,8 +30,9 @@ export class GameScene extends Phaser.Scene {
     border.strokeRect(-WORLD_SIZE / 2, -WORLD_SIZE / 2, WORLD_SIZE, WORLD_SIZE);
 
     // 그룹
-    this.enemies = this.physics.add.group();
-    this.xpOrbs  = this.physics.add.group();
+    this.enemies   = this.physics.add.group();
+    this.xpOrbs    = this.physics.add.group();
+    this.itemDrops = this.physics.add.group();
 
     // 플레이어
     this._createPlayer();
@@ -59,6 +61,7 @@ export class GameScene extends Phaser.Scene {
     this.speedMult     = 1;
     this.magnetRange   = 80;
     this.armorMult     = 1;
+    this.xpMult        = 1;
     this.invincUntil   = 0;
     this.isPaused      = false;
     this.isGameOver    = false;
@@ -74,6 +77,7 @@ export class GameScene extends Phaser.Scene {
       { type: 'spell', id: 'ice_shard' },
       { type: 'modifier', id: 'multi_shot' }
     ];
+    this.fusionSlots = [null, null, null];
 
     // 시스템
     this.spellSystem = new SpellSystem(this);
@@ -90,14 +94,27 @@ export class GameScene extends Phaser.Scene {
     this.physics.add.overlap(this.player, this.xpOrbs, (_p, orb) => {
       if (orb.active) this._collectXP(orb);
     }, null, this);
+    this.physics.add.overlap(this.player, this.itemDrops, (_p, drop) => {
+      if (drop.active) this._collectItem(drop);
+    }, null, this);
 
     // UI 씬
     this.scene.launch('UIScene');
     this.uiScene = this.scene.get('UIScene');
 
+    // 오디오
+    this.sfx = new SFX();
+    try {
+      if (this.cache.audio.exists('bgm')) {
+        this.bgm = this.sound.add('bgm', { loop: true, volume: 0.25 });
+        this.bgm.play();
+      }
+    } catch (e) { /* audio not available */ }
+
     this._showHint('🖱️ 클릭으로 공격  |  TAB으로 지팡이 편집', 4000);
 
     this.events.on('shutdown', () => {
+      if (this.bgm) this.bgm.stop();
       this.spellSystem.cleanup();
       this.scene.stop('UIScene');
       this.input.setDefaultCursor('default');
@@ -121,7 +138,7 @@ export class GameScene extends Phaser.Scene {
     this._handleShooting(time);
     this.enemySystem.update(time, delta);
     this.spellSystem.update(time, delta);
-    this._magnetXP();
+    this._magnetPickups();
     this._drawEnemyHP();
 
     this.crosshair.setPosition(this.input.activePointer.x, this.input.activePointer.y);
@@ -214,6 +231,51 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ════════════════════════════════════════════
+  // 아이템 조합 (3개 → 1개)
+  // ════════════════════════════════════════════
+  placeFusionItem(fusionIdx, invIdx) {
+    const item = this.inventory[invIdx];
+    if (!item || fusionIdx >= 3) return;
+    if (this.fusionSlots[fusionIdx]) {
+      this.inventory.push(this.fusionSlots[fusionIdx]);
+    }
+    this.fusionSlots[fusionIdx] = item;
+    this.inventory.splice(invIdx, 1);
+  }
+
+  removeFusionItem(fusionIdx) {
+    if (!this.fusionSlots[fusionIdx]) return;
+    this.inventory.push(this.fusionSlots[fusionIdx]);
+    this.fusionSlots[fusionIdx] = null;
+  }
+
+  executeFusion() {
+    if (this.fusionSlots.some(s => !s)) return null;
+    const inputs = this.fusionSlots.map(s => ({ type: s.type, id: s.id }));
+    this.fusionSlots = [null, null, null];
+
+    const inputIds = inputs.map(i => i.id);
+    const allSameId = inputIds.every(id => id === inputIds[0]);
+    const allSpells = inputs.every(i => i.type === 'spell');
+    const allMods = inputs.every(i => i.type === 'modifier');
+
+    let pool;
+    if (allSameId && allSpells) {
+      pool = Object.values(MODIFIERS).map(m => ({ type: 'modifier', id: m.id }));
+    } else if (allSameId && allMods) {
+      pool = Object.values(BASE_SPELLS).map(s => ({ type: 'spell', id: s.id }));
+    } else {
+      pool = [
+        ...Object.values(BASE_SPELLS).map(s => ({ type: 'spell', id: s.id })),
+        ...Object.values(MODIFIERS).map(m => ({ type: 'modifier', id: m.id }))
+      ];
+      const filtered = pool.filter(p => !inputIds.includes(p.id));
+      if (filtered.length) pool = filtered;
+    }
+    return Phaser.Utils.Array.GetRandom(pool);
+  }
+
+  // ════════════════════════════════════════════
   // 데미지 처리
   // ════════════════════════════════════════════
   damageEnemy(enemy, amount) {
@@ -235,6 +297,7 @@ export class GameScene extends Phaser.Scene {
     this.playerHP -= amount * this.armorMult;
     this.cameras.main.shake(70, 0.01);
     this.player.setTintFill(0xff0000);
+    this.sfx?.playerHit();
     this.time.delayedCall(70, () => this.player.clearTint());
     if (this.playerHP <= 0) this._gameOver();
   }
@@ -261,6 +324,19 @@ export class GameScene extends Phaser.Scene {
         alpha: 0, scaleX: 0, scaleY: 0, duration: 220, onComplete: () => p.destroy()
       });
     }
+    // 아이템 드롭 (투사체/모디파이어)
+    const isBoss = enemy.boss;
+    const dropCount = isBoss
+      ? BOSS_DROP_COUNT
+      : (Math.random() < DROP_RATE_NORMAL ? 1 : 0);
+    for (let i = 0; i < dropCount; i++) {
+      this._spawnItemDrop(
+        enemy.x + (Math.random() - 0.5) * 30,
+        enemy.y + (Math.random() - 0.5) * 30
+      );
+    }
+
+    this.sfx?.enemyDie();
     this.killCount++;
     enemy.destroy();
   }
@@ -285,10 +361,62 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ════════════════════════════════════════════
+  // 아이템 드롭
+  // ════════════════════════════════════════════
+  _spawnItemDrop(x, y) {
+    const isModifier = Math.random() < 0.55;
+    let item, color;
+    if (isModifier) {
+      const mod = Phaser.Utils.Array.GetRandom(Object.values(MODIFIERS));
+      item = { type: 'modifier', id: mod.id };
+      color = mod.color;
+    } else {
+      const spell = Phaser.Utils.Array.GetRandom(Object.values(BASE_SPELLS));
+      item = { type: 'spell', id: spell.id };
+      color = spell.color;
+    }
+
+    const drop = this.physics.add.sprite(x, y, 'item_drop');
+    drop.setTint(color).setDepth(6);
+    drop.itemData = item;
+    this.itemDrops.add(drop);
+
+    const a = Math.random() * Math.PI * 2;
+    drop.setVelocity(Math.cos(a) * 80, Math.sin(a) * 80);
+    this.time.delayedCall(300, () => { if (drop.active) drop.setVelocity(0, 0); });
+
+    this.tweens.add({
+      targets: drop, scaleX: 1.3, scaleY: 1.3,
+      duration: 500, yoyo: true, repeat: -1, ease: 'Sine.easeInOut'
+    });
+
+    this.time.delayedCall(DROP_LIFETIME, () => {
+      if (drop.active) {
+        this.tweens.add({ targets: drop, alpha: 0, duration: 1500, onComplete: () => drop.destroy() });
+      }
+    });
+  }
+
+  _collectItem(drop) {
+    if (!drop.active || !drop.itemData) return;
+    const item = drop.itemData;
+
+    if (this.inventory.length < MAX_INVENTORY) {
+      this.inventory.push({ type: item.type, id: item.id });
+      this.sfx?.itemPickup();
+      const info = item.type === 'modifier' ? MODIFIERS[item.id] : BASE_SPELLS[item.id];
+      this._showHint(`${info?.icon || '?'} ${info?.name || '???'} 획득!  TAB으로 배치`, 2500);
+    } else {
+      this._showHint('⚠️ 인벤토리가 가득 참!', 1500);
+    }
+    drop.destroy();
+  }
+
+  // ════════════════════════════════════════════
   // XP & 레벨업
   // ════════════════════════════════════════════
   _collectXP(orb) {
-    this.playerXP += orb.xpValue || 5;
+    this.playerXP += Math.ceil((orb.xpValue || 5) * this.xpMult);
     orb.destroy();
     while (this.playerXP >= this.xpToNext) {
       this.playerXP -= this.xpToNext;
@@ -298,18 +426,24 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  _magnetXP() {
-    this.xpOrbs.getChildren().forEach(orb => {
-      if (!orb.active) return;
-      const d = dist(this.player, orb);
-      if (d < this.magnetRange) {
-        const a = angleTo(orb, this.player);
-        orb.setVelocity(Math.cos(a) * 350 * (1 - d / this.magnetRange), Math.sin(a) * 350 * (1 - d / this.magnetRange));
-      }
-    });
+  _magnetPickups() {
+    const magnet = (group) => {
+      group.getChildren().forEach(obj => {
+        if (!obj.active) return;
+        const d = dist(this.player, obj);
+        if (d < this.magnetRange) {
+          const a = angleTo(obj, this.player);
+          const force = 350 * (1 - d / this.magnetRange);
+          obj.setVelocity(Math.cos(a) * force, Math.sin(a) * force);
+        }
+      });
+    };
+    magnet(this.xpOrbs);
+    magnet(this.itemDrops);
   }
 
   _levelUp() {
+    this.sfx?.levelUp();
     this.isPaused = true;
     this.physics.pause();
     const ring = this.add.circle(this.player.x, this.player.y, 12, 0xffff44, 0.4).setDepth(50);
@@ -323,29 +457,20 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** 레벨업 보상 생성: 주문/모디파이어/특수 중 3개 */
+  /** 레벨업 보상 생성: 패시브 전용 (+ 5레벨마다 지팡이) */
   _generateRewards() {
-    const pool = [];
+    const pool = [
+      { type: 'passive', id: 'hp_up',     name: '❤️ 체력 강화',     desc: '최대 HP +25, 현재 HP 회복', color: 0xff4444 },
+      { type: 'passive', id: 'speed_up',  name: '👟 신속 강화',     desc: '이동속도 +12%',              color: 0x44ff44 },
+      { type: 'passive', id: 'magnet_up', name: '🧲 자석 강화',     desc: 'XP 수집 범위 +40',           color: 0x44ffff },
+      { type: 'passive', id: 'armor',     name: '🛡️ 방어력 강화',   desc: '받는 피해 -10%',             color: 0x8888aa },
+      { type: 'passive', id: 'xp_bonus',  name: '⭐ 경험치 보너스', desc: '경험치 획득량 +20%',         color: 0xffff44 },
+    ];
 
-    // 주문 아이템
-    const spells = Object.values(BASE_SPELLS);
-    shuffle(spells).slice(0, 2).forEach(sp => {
-      pool.push({
-        type: 'spell', id: sp.id,
-        name: `${sp.icon} ${sp.name}`, desc: sp.desc, color: sp.color
-      });
-    });
+    if (this.wands.some(w => w.slotCount < 10)) {
+      pool.push({ type: 'passive', id: 'slot_up', name: '🔧 슬롯 확장', desc: '모든 지팡이 슬롯 +1 (최대 10)', color: 0xffaa44 });
+    }
 
-    // 모디파이어 아이템
-    const mods = Object.values(MODIFIERS);
-    shuffle(mods).slice(0, 3).forEach(mod => {
-      pool.push({
-        type: 'modifier', id: mod.id,
-        name: `${mod.icon} ${mod.name}`, desc: mod.desc, color: mod.color
-      });
-    });
-
-    // 특수 보상 (레벨 5마다 지팡이)
     if (this.playerLevel % 5 === 0 && this.wands.length < 3) {
       const wandKeys = Object.keys(WAND_TEMPLATES).filter(k =>
         !this.wands.find(w => w.id === k)
@@ -360,37 +485,27 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // 패시브 (항상 1개)
-    const passives = [
-      { type: 'passive', id: 'hp_up', name: '❤️ 체력 +20', desc: '최대 HP 증가', color: 0xff4444 },
-      { type: 'passive', id: 'speed_up', name: '👟 이속 +15%', desc: '이동속도 증가', color: 0x44ff44 },
-      { type: 'passive', id: 'magnet_up', name: '🧲 자석 +30', desc: 'XP 수집 범위 확대', color: 0x44ffff },
-      { type: 'passive', id: 'armor', name: '🛡️ 방어 +10%', desc: '피해 감소', color: 0x8888aa },
-    ];
-    pool.push(Phaser.Utils.Array.GetRandom(passives));
-
     return shuffle(pool).slice(0, 3);
   }
 
-  /** 레벨업 보상 적용: 아이템은 인벤토리로, 패시브/지팡이는 즉시 적용 */
+  /** 레벨업 보상 적용: 패시브 즉시 적용, 지팡이 획득 */
   applyReward(choice) {
-    if (choice.type === 'spell' || choice.type === 'modifier') {
-      // 인벤토리에 추가
-      if (this.inventory.length < MAX_INVENTORY) {
-        this.inventory.push({ type: choice.type, id: choice.id });
-        this._showHint(`${choice.name} → 인벤토리!  TAB으로 지팡이에 배치`, 3000);
-      } else {
-        this._showHint('⚠️ 인벤토리가 가득 참!', 2000);
-      }
-    } else if (choice.type === 'wand') {
+    if (choice.type === 'wand') {
       this.wands.push(new Wand(WAND_TEMPLATES[choice.id]));
       this._showHint(`🪄 ${choice.name} 획득!  TAB으로 확인`, 3000);
     } else if (choice.type === 'passive') {
       switch (choice.id) {
-        case 'hp_up':     this.playerMaxHP += 20; this.playerHP += 20; break;
-        case 'speed_up':  this.speedMult += 0.15; break;
-        case 'magnet_up': this.magnetRange += 30; break;
+        case 'hp_up':     this.playerMaxHP += 25; this.playerHP += 25; break;
+        case 'speed_up':  this.speedMult += 0.12; break;
+        case 'magnet_up': this.magnetRange += 40; break;
         case 'armor':     this.armorMult = Math.max(this.armorMult - 0.1, 0.3); break;
+        case 'xp_bonus':  this.xpMult += 0.2; break;
+        case 'slot_up':
+          this.wands.forEach(w => {
+            if (w.slotCount < 10) { w.slotCount++; w.slots.push(null); }
+          });
+          this._showHint('🔧 모든 지팡이 슬롯 +1!', 2500);
+          break;
       }
     }
     this.isPaused = false;

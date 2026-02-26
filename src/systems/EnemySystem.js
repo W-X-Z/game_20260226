@@ -29,9 +29,12 @@ export class EnemySystem {
     }
 
     const wave = WAVE_CONFIG[this.waveIndex];
+    const timeBonus = Math.floor(this.gameTime / 60) * 3;
+    const effectiveMax = wave.max + timeBonus;
+    const effectiveRate = Math.max(wave.rate * Math.max(1 - this.gameTime * 0.001, 0.4), 150);
     const alive = this.scene.enemies.getChildren().filter(e => e.active).length;
 
-    if (alive < wave.max && time - this.lastSpawn > wave.rate) {
+    if (alive < effectiveMax && time - this.lastSpawn > effectiveRate) {
       this._spawnEnemy(wave.types);
       this.lastSpawn = time;
     }
